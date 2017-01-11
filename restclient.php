@@ -36,6 +36,7 @@ class RestClient implements Iterator, ArrayAccess {
                 'json' => 'json_decode', 
                 'php' => 'unserialize'
             ], 
+            'cachechecker' => function(){return false;},
             'username' => NULL, 
             'password' => NULL
         ];
@@ -55,6 +56,12 @@ class RestClient implements Iterator, ArrayAccess {
         //   array my_decoder(string $data)
         $this->options['decoders'][$format] = $method;
     }
+    public function register_cachechecker($method){
+        // Decoder callbacks must adhere to the following pattern:
+        //   array my_decoder(string $hash, string $key)
+        $this->options['cachechecker'] = $method;
+    }
+    
     
     // Iterable methods:
     public function rewind(){
@@ -104,15 +111,36 @@ class RestClient implements Iterator, ArrayAccess {
     }
     
     // Request methods:
-    public function get($url, $parameters=[], $headers=[]){
-        return $this->execute($url, 'GET', $parameters, $headers);
+    public function get($url, $parameters=[], $headers=[], $caching = true){
+        $this->options['caching'] = false;
+        // Check Cache first
+        $cache = $this->execute($url, 'GET', $parameters, array_merge($headers, ['Hash' => "1"]));
+        $hash = $cache->decode_response();
+        $key  = $cache->headers->x_cache_hash;
+        // Pass Hash and Query Parameter to Cache checker
+        $parsed = call_user_func($this->options['cachechecker'], $hash, $key, $this);
+        if ($parsed === false) {
+          // Continue here if uncached
+          $this->options['caching'] = $caching;  
+          return $this->execute($url, 'GET', $parameters, $headers);
+        }              
+              
+        $client = clone $this;              
+        $client->headers  = (object) $parsed["Headers"];
+        $client->decoded_response = $parsed["Decoded"];
+        $client->info     = (object) $parsed["Info"];
+        $client->error    = (object) $parsed["Error"];
+        $client->info->cached = true;
+        return $client;
     }
     
     public function post($url, $parameters=[], $headers=[]){
+        $this->options['caching'] = false;
         return $this->execute($url, 'POST', $parameters, $headers);
     }
     
     public function put($url, $parameters=[], $headers=[]){
+        $this->options['caching'] = false;
         return $this->execute($url, 'PUT', $parameters, $headers);
     }
     
@@ -121,6 +149,7 @@ class RestClient implements Iterator, ArrayAccess {
     }
     
     public function delete($url, $parameters=[], $headers=[]){
+        $this->options['caching'] = false;
         return $this->execute($url, 'DELETE', $parameters, $headers);
     }
     
@@ -270,7 +299,7 @@ class RestClient implements Iterator, ArrayAccess {
                     "format, register a decoder to handle this response.");
             
             $this->decoded_response = call_user_func(
-                $this->options['decoders'][$format], $this->response);
+                $this->options['decoders'][$format], $this->response, $this);
         }
         
         return $this->decoded_response;
