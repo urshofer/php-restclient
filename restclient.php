@@ -111,12 +111,20 @@ class RestClient implements Iterator, ArrayAccess {
     }
 
     // Request methods:
-    public function get($url, $parameters=[], $headers=[], $caching = true){
+    public function get($url, $parameters=[], $headers=[], $caching = true, $timebased = false){
         $this->options['caching'] = false;
         // Check Cache first
-        $cache = $this->execute($url, 'GET', $parameters, array_merge($headers, ['Hash' => "1"]));
-        $hash = $cache->decode_response();
-        $key  = $cache->headers->x_cache_hash;
+        if ($timebased === false) {
+          $cache = $this->execute($url, 'GET', $parameters, array_merge($headers, ['Hash' => "1"]));
+          $hash = $cache->decode_response();
+          $key  = $cache->headers->x_cache_hash;
+          $this->_timestamp_hash = false;
+        }
+        else {
+          $cache = false;
+          $hash  = "timebased";
+          $key   =  $this->_timestamp_hash = "_timed_" . md5(serialize([$url, $parameters, $headers]));
+        }
         // Pass Hash and Query Parameter to Cache checker
         $parsed = call_user_func($this->options['cachechecker'], $hash, $key, $this);
         if ($parsed === false) {
