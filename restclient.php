@@ -37,8 +37,10 @@ class RestClient implements Iterator, ArrayAccess {
                 'php' => 'unserialize'
             ],
             'cachechecker' => function(){return false;},
+            'cachestore'   => function(){return true;},
             'username' => NULL,
-            'password' => NULL
+            'password' => NULL,
+            'logger'   => function($msg){}
         ];
 
         $this->options = array_merge($default_options, $options);
@@ -56,10 +58,17 @@ class RestClient implements Iterator, ArrayAccess {
         //   array my_decoder(string $data)
         $this->options['decoders'][$format] = $method;
     }
+    
     public function register_cachechecker($method){
-        // Decoder callbacks must adhere to the following pattern:
-        //   array my_decoder(string $hash, string $key)
+        // Cache Checker: Executed before GET Requests
+        //   array my_checker(string $hash, string $key)
         $this->options['cachechecker'] = $method;
+    }
+
+    public function register_cachestore($method){
+        // Cache Store: Executed after GET Requests
+        //   array my_store(string $method)
+        $this->options['cachestore'] = $method;
     }
 
 
@@ -112,43 +121,55 @@ class RestClient implements Iterator, ArrayAccess {
 
     // Request methods:
     public function get($url, $parameters=[], $headers=[], $caching = true, $timebased = false){
-        $this->options['caching'] = false;
+        $parsed = false;
         // Check Cache first
-        if ($timebased === false) {
-          $cache = $this->execute($url, 'GET', $parameters, array_merge($headers, ['Hash' => "1"]));
-          $hash = $cache->decode_response();
-          $key  = $cache->headers->x_cache_hash;
-          $this->_timestamp_hash = false;
+        if ($caching === true) {
+            if ($timebased === false) {
+                $cache = $this->execute($url, 'GET', $parameters, array_merge($headers, ['Hash' => "1"]));
+                $hash = $cache->decode_response();
+                $key  = $cache->headers->x_cache_hash;
+                $this->_timestamp_hash = false;
+              }
+              else {
+                $hash  = "";
+                $key   = $this->_timestamp_hash = "_timed_" . md5(serialize([$url, $parameters, $headers]));
+              }
+              // Pass Hash and Query Parameter to Cache checker
+              $parsed = call_user_func($this->options['cachechecker'], $hash, $timebased, $key, $this);
         }
-        else {
-          $cache = false;
-          $hash  = "timebased";
-          $key   =  $this->_timestamp_hash = "_timed_" . md5(serialize([$url, $parameters, $headers]));
-        }
-        // Pass Hash and Query Parameter to Cache checker
-        $parsed = call_user_func($this->options['cachechecker'], $hash, $key, $this);
+        
         if ($parsed === false) {
           // Continue here if uncached
-          $this->options['caching'] = $caching;
-          return $this->execute($url, 'GET', $parameters, $headers);
-        }
+          
+          $client = $this->execute($url, 'GET', $parameters, $headers);
+          $client->decoded_response   = $client->decode_response();
 
-        $client = clone $this;
-        $client->headers  = (object) $parsed["Headers"];
-        $client->decoded_response = $parsed["Decoded"];
-        $client->info     = (object) $parsed["Info"];
-        $client->error    = (object) $parsed["Error"];
-        $client->info->cached = true;
-        return $client;
+          if ($caching === true)
+            if (!call_user_func(
+                $this->options['cachestore'], $client->response, $client->decoded_response, $client))
+                    throw new RestClientException("Unable to store Cache.");
+
+            return $client;
+        }
+        else {
+            $client = clone $this;
+            $client->headers            = (object) $parsed["Headers"];
+            $client->decoded_response   = $parsed["Decoded"];
+            $client->info               = (object) $parsed["Info"];
+            $client->error              = (object) $parsed["Error"];
+            $client->info->cached       = true;
+            return $client;
+        }
+        
     }
 
     public function post($url, $parameters=[], $headers=[]){
-        $this->options['caching'] = false;
+        //$this->options['caching'] = false;
         return $this->execute($url, 'POST', $parameters, $headers);
     }
 
     public function put($url, $parameters=[], $headers=[]){
-        $this->options['caching'] = false;
+        //$this->options['caching'] = false;
         return $this->execute($url, 'PUT', $parameters, $headers);
     }
 
@@ -157,7 +178,7 @@ class RestClient implements Iterator, ArrayAccess {
     }
 
     public function delete($url, $parameters=[], $headers=[]){
-        $this->options['caching'] = false;
+        //$this->options['caching'] = false;
         return $this->execute($url, 'DELETE', $parameters, $headers);
     }
 
@@ -229,8 +250,9 @@ class RestClient implements Iterator, ArrayAccess {
             }
         }
         curl_setopt_array($client->handle, $curlopt);
-
-        $client->parse_response(curl_exec($client->handle));
+        
+        $client->options['logger']->info('['.$method.']['.($headers['Hash']?"\033[0;36mH\033[0m":"\033[0;31mC\033[0m").'] '.$curlopt[CURLOPT_URL]);
+        $client->parse_response(curl_exec($client->handle), $method);
         $client->info = (object) curl_getinfo($client->handle);
         $client->error = curl_error($client->handle);
 
@@ -249,7 +271,7 @@ class RestClient implements Iterator, ArrayAccess {
         return rtrim($query, $secondary);
     }
 
-    public function parse_response($response){
+    public function parse_response($response, $method){
         $headers = [];
         $this->response_status_lines = [];
         $line = strtok($response, "\n");
@@ -307,7 +329,8 @@ class RestClient implements Iterator, ArrayAccess {
                     "format, register a decoder to handle this response.");
 
             $this->decoded_response = call_user_func(
-                $this->options['decoders'][$format], $this->response, $this);
+                $this->options['decoders'][$format], $this->response);
+
         }
 
         return $this->decoded_response;
