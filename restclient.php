@@ -155,6 +155,7 @@ class RestClient implements Iterator, ArrayAccess {
             $client = clone $this;
             $client->headers            = (object) $parsed["Headers"];
             $client->decoded_response   = $parsed["Decoded"];
+            $client->response           = $parsed["Response"];
             $client->info               = (object) $parsed["Info"];
             $client->error              = (object) $parsed["Error"];
             $client->info->cached       = true;
